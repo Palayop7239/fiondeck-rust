@@ -1,0 +1,161 @@
+mod config;
+mod discovery;
+mod messages;
+mod parser;
+mod protocol;
+mod serial_worker;
+
+use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
+use std::sync::Arc;
+use std::time::Duration;
+
+use crate::config::{Action, Config, Input};
+use crate::messages::{button_label, knob_label, Cmd, DeviceEvent, SerialEvent};
+use crate::parser::Parser;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let config = config::load_or_create(Path::new(config::DEFAULT_PATH))?;
+    println!(
+        "Loaded {} bindings from {}",
+        config.bindings.len(),
+        config::DEFAULT_PATH
+    );
+
+    let port_name = match discovery::find_loupedeck_port() {
+        Some(name) => name,
+        None => {
+            println!("No Loupedeck/Razer device found.");
+            return Ok(());
+        }
+    };
+
+    println!("Found device on {port_name}");
+
+    let running = Arc::new(AtomicBool::new(true));
+    let running_for_ctrlc = running.clone();
+    ctrlc::set_handler(move || {
+        running_for_ctrlc.store(false, Ordering::SeqCst);
+    })?;
+
+    // Worker -> main: device events and errors.
+    let (event_tx, event_rx) = mpsc::channel::<SerialEvent>();
+    // Main -> worker: commands to send to the device.
+    let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>();
+
+    let running_for_worker = running.clone();
+    std::thread::spawn(move || {
+        serial_worker::run(port_name, event_tx, running_for_worker, cmd_rx);
+    });
+
+    // Match the screen to the configured starting brightness.
+    let mut brightness: i16 = config.brightness.min(10) as i16;
+    let _ = cmd_tx.send(Cmd::SetBrightness(brightness as u8));
+    println!("Brightness {brightness}/10. Press Ctrl+C to quit.");
+
+    let mut parser = Parser::new();
+
+    while running.load(Ordering::SeqCst) {
+        let event = match event_rx.recv_timeout(Duration::from_millis(200)) {
+            Ok(event) => event,
+            // Idle tick; just check `running` again.
+            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            // Worker is gone.
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        };
+
+        match event {
+            SerialEvent::DeviceOpened(name) => println!("Opened {name}"),
+
+            SerialEvent::Frame(frame) => {
+                let Some(device_event) = parser.parse(&frame) else {
+                    // Acknowledgements, ticks, unsupported messages.
+                    continue;
+                };
+
+                handle_event(&device_event, &config, &cmd_tx, &mut brightness);
+            }
+
+            SerialEvent::Error(message) => println!("Serial error: {message}"),
+        }
+    }
+
+    println!("Shutting down.");
+    Ok(())
+}
+
+/// Print the event and run whatever action the config binds to it.
+fn handle_event(
+    event: &DeviceEvent,
+    config: &Config,
+    cmd_tx: &mpsc::Sender<Cmd>,
+    brightness: &mut i16,
+) {
+    match event {
+        DeviceEvent::ButtonDown { id } => {
+            println!("{} pressed", button_label(*id));
+            match config.action(Input::Press, *id) {
+                Some(action) => run_action(action, 1, cmd_tx, brightness),
+                None => println!("  (no binding for press id {id})"),
+            }
+        }
+
+        DeviceEvent::ButtonUp { id } => {
+            println!("{} released", button_label(*id));
+        }
+
+        DeviceEvent::KnobRotate { id, delta } => {
+            let direction = if *delta > 0 { "right" } else { "left" };
+            println!("{} turned {direction}", knob_label(*id));
+
+            match config.action(Input::Rotate, *id) {
+                Some(action) => run_action(action, *delta, cmd_tx, brightness),
+                None => println!("  (no binding for rotate id {id})"),
+            }
+        }
+
+        DeviceEvent::TouchStart { id, x, y } => {
+            println!("touch start id={id} x={x} y={y}");
+        }
+
+        DeviceEvent::TouchMove { id, x, y } => {
+            println!("touch move id={id} x={x} y={y}");
+        }
+
+        DeviceEvent::TouchEnd { id, x, y } => {
+            println!("touch end id={id} x={x} y={y}");
+        }
+    }
+}
+
+/// Turn one configured action into a command for the device.
+///
+/// `direction` is +1 for a press and the knob delta for a turn, so a
+/// brightness step follows the direction the knob was actually turned.
+fn run_action(action: &Action, direction: i8, cmd_tx: &mpsc::Sender<Cmd>, brightness: &mut i16) {
+    match action {
+        Action::Vibrate { pattern } => {
+            let byte = pattern.byte();
+            let _ = cmd_tx.send(Cmd::Vibrate(byte));
+            println!("  -> vibrate {pattern:?} (0x{byte:02x})");
+        }
+
+        Action::BrightnessStep { step } => {
+            *brightness = (*brightness + *step as i16 * direction as i16).clamp(0, 10);
+            set_brightness(*brightness, cmd_tx);
+        }
+
+        Action::SetBrightness { level } => {
+            *brightness = (*level).min(10) as i16;
+            set_brightness(*brightness, cmd_tx);
+        }
+
+        Action::Disabled => println!("  (binding disabled)"),
+    }
+}
+
+fn set_brightness(level: i16, cmd_tx: &mpsc::Sender<Cmd>) {
+    let _ = cmd_tx.send(Cmd::SetBrightness(level as u8));
+    println!("  -> brightness {level}/10");
+}

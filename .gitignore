@@ -1,0 +1,7 @@
+/target
+
+# personal setup, generated on first run
+bindings.toml
+
+# local protocol notes
+LOUPEDECK_COMMS.md
