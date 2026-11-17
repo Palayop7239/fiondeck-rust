@@ -123,35 +123,7 @@ impl Canvas {
         width: u16,
         height: u16,
     ) -> Result<(), String> {
-        let source =
-            image::open(path).map_err(|error| format!("could not open {}: {error}", path.display()))?;
-
-        // Work in RGBA so a PNG with transparency keeps it.
-        let source = source.to_rgba8();
-        let (source_width, source_height) = source.dimensions();
-
-        if source_width == 0 || source_height == 0 {
-            return Err(format!("{} has no pixels", path.display()));
-        }
-
-        // One scale factor for both axes, so the shape is kept. `min` means
-        // the longer side decides it, which is what "fit" means.
-        let scale = (width as f32 / source_width as f32).min(height as f32 / source_height as f32);
-        let scaled_width = ((source_width as f32 * scale).round() as u32).max(1);
-        let scaled_height = ((source_height as f32 * scale).round() as u32).max(1);
-
-        // Triangle is a cheap smooth filter: better than nearest-neighbour on
-        // photos, and fast enough for a 90 px key.
-        let scaled = image::imageops::resize(
-            &source,
-            scaled_width,
-            scaled_height,
-            image::imageops::FilterType::Triangle,
-        );
-
-        // Centre the result in the box.
-        let origin_x = x + (width as i32 - scaled_width as i32) / 2;
-        let origin_y = y + (height as i32 - scaled_height as i32) / 2;
+        let (scaled, origin_x, origin_y) = fitted_image(path, x, y, width, height)?;
 
         for (column, row, pixel) in scaled.enumerate_pixels() {
             let [r, g, b, alpha] = pixel.0;
@@ -163,6 +135,43 @@ impl Canvas {
             let pixel_y = origin_y + row as i32;
 
             let color = Rgb::new(r, g, b);
+            let under = self.pixel_or(pixel_x, pixel_y);
+
+            self.set(pixel_x, pixel_y, color.blend(under, alpha));
+        }
+
+        Ok(())
+    }
+
+    /// Draw a one-colour icon in `color`, using the file's transparency only.
+    ///
+    /// This is the difference between a photo and an icon. An icon file is a
+    /// shape, not a picture: `assets/icons` are black or white glyphs with a
+    /// transparent background, so a black one vanishes on a dark key and a
+    /// white one vanishes on a light key. Ignoring the stored colour and
+    /// painting the shape in the colour the caller asks for makes each icon
+    /// work on any background, and lets one glyph be green when it is on and
+    /// grey when it is off.
+    pub fn draw_icon(
+        &mut self,
+        path: &Path,
+        x: i32,
+        y: i32,
+        width: u16,
+        height: u16,
+        color: Rgb,
+    ) -> Result<(), String> {
+        let (scaled, origin_x, origin_y) = fitted_image(path, x, y, width, height)?;
+
+        for (column, row, pixel) in scaled.enumerate_pixels() {
+            let alpha = pixel.0[3];
+            if alpha == 0 {
+                continue;
+            }
+
+            let pixel_x = origin_x + column as i32;
+            let pixel_y = origin_y + row as i32;
+
             let under = self.pixel_or(pixel_x, pixel_y);
 
             self.set(pixel_x, pixel_y, color.blend(under, alpha));
@@ -254,6 +263,50 @@ impl Canvas {
     }
 }
 
+/// Load an image and scale it to fit a box, returning it with where it goes.
+///
+/// Kept separate from `Canvas` because two callers want the same pixels for
+/// different reasons: a photo keeps its colours, an icon only keeps its shape.
+fn fitted_image(
+    path: &Path,
+    x: i32,
+    y: i32,
+    width: u16,
+    height: u16,
+) -> Result<(image::RgbaImage, i32, i32), String> {
+    let source =
+        image::open(path).map_err(|error| format!("could not open {}: {error}", path.display()))?;
+
+    // Work in RGBA so a PNG with transparency keeps it.
+    let source = source.to_rgba8();
+    let (source_width, source_height) = source.dimensions();
+
+    if source_width == 0 || source_height == 0 {
+        return Err(format!("{} has no pixels", path.display()));
+    }
+
+    // One scale factor for both axes, so the shape is kept. `min` means the
+    // longer side decides it, which is what "fit" means.
+    let scale = (width as f32 / source_width as f32).min(height as f32 / source_height as f32);
+    let scaled_width = ((source_width as f32 * scale).round() as u32).max(1);
+    let scaled_height = ((source_height as f32 * scale).round() as u32).max(1);
+
+    // Triangle is a cheap smooth filter: better than nearest-neighbour on
+    // photos, and fast enough for a 90 px key.
+    let scaled = image::imageops::resize(
+        &source,
+        scaled_width,
+        scaled_height,
+        image::imageops::FilterType::Triangle,
+    );
+
+    // Centre the result in the box.
+    let origin_x = x + (width as i32 - scaled_width as i32) / 2;
+    let origin_y = y + (height as i32 - scaled_height as i32) / 2;
+
+    Ok((scaled, origin_x, origin_y))
+}
+
 /// Top-left corner of a key, in screen pixels.
 pub fn key_origin(index: u8) -> (u16, u16) {
     let column = index % surface::COLUMNS;
@@ -315,6 +368,62 @@ pub fn image_test(path: &Path) -> Result<Cmd, String> {
     )?;
 
     Ok(canvas.into_cmd(0, 0))
+}
+
+/// Space left around an icon inside a key.
+///
+/// 90 - 2 * 9 = 72, which is exactly the size of the icons in `assets/icons`,
+/// so they land on the panel 1:1 with no resampling and stay perfectly sharp.
+pub const ICON_PADDING: u16 = 9;
+
+/// One key: a one-colour icon centred on a solid background.
+pub fn icon_key(index: u8, background: Rgb, path: &Path, color: Rgb) -> Result<Cmd, String> {
+    let mut canvas = Canvas::new(surface::KEY_SIZE, surface::KEY_SIZE, background);
+    let inner = surface::KEY_SIZE - 2 * ICON_PADDING;
+
+    canvas.draw_icon(
+        path,
+        ICON_PADDING as i32,
+        ICON_PADDING as i32,
+        inner,
+        inner,
+        color,
+    )?;
+
+    let (origin_x, origin_y) = key_origin(index);
+    Ok(canvas.into_cmd(origin_x, origin_y))
+}
+
+/// The icons in `assets/icons`, one per key, in different colour pairs.
+///
+/// Reads them off disk at run time, so a missing or unreadable file fails
+/// loudly instead of silently leaving a black key.
+pub fn icon_test() -> Result<Vec<Cmd>, String> {
+    const WHITE: Rgb = Rgb::new(255, 255, 255);
+    const BLACK: Rgb = Rgb::new(0, 0, 0);
+    const GREY: Rgb = Rgb::new(40, 40, 40);
+    const GREEN: Rgb = Rgb::new(47, 111, 79);
+    const RED: Rgb = Rgb::new(200, 60, 60);
+    const MINT: Rgb = Rgb::new(120, 255, 170);
+    const LIGHT: Rgb = Rgb::new(235, 235, 235);
+
+    // (file, background, icon colour): white ink on dark keys, and one dark
+    // ink on a light key, because the files come in both flavours.
+    let demos: [(&str, Rgb, Rgb); 5] = [
+        ("assets/icons/headphones-off.png", GREY, WHITE),
+        ("assets/icons/headphones-on.png", GREEN, WHITE),
+        ("assets/icons/mic-off.png", GREY, RED),
+        ("assets/icons/mic-on.png", GREY, MINT),
+        ("assets/icons/mixer-icon.png", LIGHT, BLACK),
+    ];
+
+    demos
+        .iter()
+        .enumerate()
+        .map(|(index, (file, background, color))| {
+            icon_key(index as u8, *background, Path::new(file), *color)
+        })
+        .collect()
 }
 
 /// One colour per key, each showing its own number.
@@ -532,7 +641,7 @@ mod tests {
     }
 
     #[test]
-    fn an_image_key_fills_the_square() {
+    fn an_icon_key_fills_the_square() {
         let path = write_test_image("key", 32, 32, [255, 255, 0, 255]);
         let background = Rgb::new(0, 0, 0);
 
@@ -550,6 +659,62 @@ mod tests {
                 // A square image leaves no background, so the first pixel is
                 // already the picture: yellow, little-endian.
                 assert_eq!(pixels[0..2], Rgb::new(255, 255, 0).bytes());
+            }
+            other => panic!("expected a framebuffer command, got {other:?}"),
+        }
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn an_icon_is_painted_in_the_colour_you_ask_for() {
+        // The file is black, but a black glyph is invisible on a dark key, so
+        // the stored colour must be ignored and the shape drawn in the tint.
+        let path = write_test_image("black-glyph", 4, 4, [0, 0, 0, 255]);
+        let background = Rgb::new(255, 255, 255);
+        let tint = Rgb::new(0, 200, 0);
+
+        let mut canvas = Canvas::new(10, 10, background);
+        canvas
+            .draw_icon(&path, 3, 3, 4, 4, tint)
+            .expect("draw");
+
+        assert_eq!(canvas.get(3, 3), tint, "top-left of the glyph");
+        assert_eq!(canvas.get(6, 6), tint, "bottom-right of the glyph");
+        assert_eq!(canvas.get(2, 3), background, "left of the box");
+        assert_eq!(canvas.get(7, 7), background, "right of the box");
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn an_icon_key_leaves_a_margin_around_the_icon() {
+        // 72 px of glyph in a 90 px key leaves 9 px of background on every
+        // side, and needs no scaling at all.
+        let path = write_test_image("glyph", 72, 72, [0, 0, 0, 255]);
+        let background = Rgb::new(0, 0, 255);
+        let tint = Rgb::new(255, 255, 255);
+
+        match icon_key(0, background, &path, tint).expect("draw") {
+            Cmd::Framebuffer {
+                width,
+                height,
+                pixels,
+                ..
+            } => {
+                assert_eq!((width, height), (90, 90));
+
+                let pixel_at = |x: usize, y: usize| {
+                    let offset = (y * 90 + x) * 2;
+                    [pixels[offset], pixels[offset + 1]]
+                };
+
+                assert_eq!(pixel_at(0, 0), background.bytes(), "corner");
+                assert_eq!(pixel_at(8, 8), background.bytes(), "just inside");
+                assert_eq!(pixel_at(9, 9), tint.bytes(), "glyph starts");
+                assert_eq!(pixel_at(80, 80), tint.bytes(), "glyph ends");
+                assert_eq!(pixel_at(81, 81), background.bytes(), "margin again");
+                assert_eq!(pixel_at(89, 89), background.bytes(), "far corner");
             }
             other => panic!("expected a framebuffer command, got {other:?}"),
         }

@@ -34,6 +34,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .nth(1)
         .map(PathBuf::from);
 
+    // `--icons` draws assets/icons across the first five keys.
+    let icons = std::env::args().any(|arg| arg == "--icons");
+
     let config = config::load_or_create(Path::new(config::DEFAULT_PATH))?;
     println!(
         "Loaded {} bindings from {}",
@@ -97,6 +100,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             let _ = cmd_tx.send(command);
                         }
                         // A bad path is the user's typo, not a crash.
+                        Err(message) => eprintln!("{message}"),
+                    }
+                }
+
+                if icons {
+                    println!("Drawing the icons...");
+
+                    match draw::icon_test() {
+                        Ok(commands) => {
+                            for command in commands {
+                                let _ = cmd_tx.send(command);
+                            }
+                        }
                         Err(message) => eprintln!("{message}"),
                     }
                 }
