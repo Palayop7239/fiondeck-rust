@@ -44,6 +44,29 @@ impl Rgb {
         self.rgb565().to_le_bytes()
     }
 
+    /// Read a `"#rrggbb"` colour, as written in `bindings.toml`.
+    ///
+    /// Strict on purpose: six digits with a leading `#`, so a typo is reported
+    /// instead of quietly turning into black.
+    pub fn from_hex(text: &str) -> Result<Rgb, String> {
+        let digits = text.strip_prefix('#').unwrap_or(text);
+
+        // Checking ASCII first matters: slicing a non-ASCII string at a fixed
+        // byte offset can panic.
+        if !digits.is_ascii() || digits.len() != 6 {
+            return Err(format!(
+                "colour {text:?} should look like \"#2f6f4f\" (six hex digits)"
+            ));
+        }
+
+        let channel = |start: usize| -> Result<u8, String> {
+            u8::from_str_radix(&digits[start..start + 2], 16)
+                .map_err(|_| format!("colour {text:?} is not hexadecimal"))
+        };
+
+        Ok(Rgb::new(channel(0)?, channel(2)?, channel(4)?))
+    }
+
     /// Mix `self` over `other`, where `alpha` is 0 (fully `other`) to 255.
     fn blend(self, other: Rgb, alpha: u8) -> Rgb {
         let alpha = alpha as u16;
@@ -229,6 +252,25 @@ impl Canvas {
             .sum()
     }
 
+    /// Draw one line horizontally centred, in the band `top..top + height`.
+    ///
+    /// The baseline is nudged by `size * 0.7` because that is roughly how far
+    /// the visible top of a capital letter sits below the top of the line.
+    pub fn text_centered(
+        &mut self,
+        text: &str,
+        size: f32,
+        color: Rgb,
+        top: i32,
+        height: u16,
+    ) {
+        let width = Self::text_width(text, size);
+        let x = (self.width as f32 - width) / 2.0;
+        let baseline = top as f32 + (height as f32 + size * 0.7) / 2.0;
+
+        self.text(x as i32, baseline as i32, text, size, color);
+    }
+
     /// Turn the canvas into one frame buffer command, placed at `x`/`y` on the
     /// screen.
     pub fn into_cmd(self, x: u16, y: u16) -> Cmd {
@@ -322,13 +364,7 @@ pub fn key_origin(index: u8) -> (u16, u16) {
 pub fn label_key(index: u8, background: Rgb, label: &str, foreground: Rgb, size: f32) -> Cmd {
     let mut canvas = Canvas::new(surface::KEY_SIZE, surface::KEY_SIZE, background);
 
-    let width = Canvas::text_width(label, size);
-
-    // Baseline placed so the label sits roughly in the middle of the square.
-    let x = (surface::KEY_SIZE as f32 - width) / 2.0;
-    let baseline = (surface::KEY_SIZE as f32 + size * 0.7) / 2.0;
-
-    canvas.text(x as i32, baseline as i32, label, size, foreground);
+    canvas.text_centered(label, size, foreground, 0, surface::KEY_SIZE);
 
     let (origin_x, origin_y) = key_origin(index);
     canvas.into_cmd(origin_x, origin_y)
@@ -520,6 +556,19 @@ mod tests {
         assert_eq!(Rgb::new(0, 0, 255).bytes(), [0x1f, 0x00]);
         assert_eq!(Rgb::new(255, 255, 255).bytes(), [0xff, 0xff]);
         assert_eq!(Rgb::new(0, 0, 0).bytes(), [0x00, 0x00]);
+    }
+
+    #[test]
+    fn hex_colours_are_read_strictly() {
+        assert_eq!(Rgb::from_hex("#2f6f4f"), Ok(Rgb::new(0x2f, 0x6f, 0x4f)));
+        assert_eq!(Rgb::from_hex("2f6f4f"), Ok(Rgb::new(0x2f, 0x6f, 0x4f)));
+
+        // A typo must be reported, not turned into black.
+        assert!(Rgb::from_hex("orange").is_err());
+        assert!(Rgb::from_hex("#12345").is_err());
+        assert!(Rgb::from_hex("#gggggg").is_err());
+        // Non-ASCII is six bytes too, so this would panic if not guarded.
+        assert!(Rgb::from_hex("#é1234").is_err());
     }
 
     #[test]

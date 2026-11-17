@@ -5,6 +5,7 @@ mod gui;
 mod messages;
 mod parser;
 mod protocol;
+mod screen;
 mod serial_worker;
 mod surface;
 
@@ -25,24 +26,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    // `--paint` fills the 15 keys with colours, to check the panel layout.
-    let paint = std::env::args().any(|arg| arg == "--paint");
+    // `--paint`, `--icons` and `--image <path>` draw a test pattern instead of
+    // the configured keys.
+    let demo = demo_from_args();
 
-    // `--image <path>` draws one picture across the whole screen.
-    let image_path = std::env::args()
-        .skip_while(|arg| arg != "--image")
-        .nth(1)
-        .map(PathBuf::from);
-
-    // `--icons` draws assets/icons across the first five keys.
-    let icons = std::env::args().any(|arg| arg == "--icons");
-
-    let config = config::load_or_create(Path::new(config::DEFAULT_PATH))?;
+    let config_path = Path::new(config::DEFAULT_PATH);
+    let config = config::load_or_create(config_path)?;
     println!(
         "Loaded {} bindings from {}",
         config.bindings.len(),
         config::DEFAULT_PATH
     );
+
+    // Icon paths are relative to the folder the config lives in.
+    let config_dir = screen::base_dir(config_path);
 
     let running = Arc::new(AtomicBool::new(true));
     let running_for_ctrlc = running.clone();
@@ -85,35 +82,47 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // the screen back to the value the config asked for.
                 set_brightness(brightness, &cmd_tx);
 
-                if paint {
-                    println!("Painting the 15 keys...");
-                    for command in draw::paint_test() {
-                        let _ = cmd_tx.send(command);
-                    }
-                }
+                match &demo {
+                    // The normal case: draw the page the config describes.
+                    Demo::Page => {
+                        println!("Drawing the keys...");
 
-                if let Some(path) = &image_path {
-                    println!("Drawing {}...", path.display());
-
-                    match draw::image_test(path) {
-                        Ok(command) => {
+                        for command in screen::page(&config, &config_dir) {
                             let _ = cmd_tx.send(command);
                         }
-                        // A bad path is the user's typo, not a crash.
-                        Err(message) => eprintln!("{message}"),
                     }
-                }
 
-                if icons {
-                    println!("Drawing the icons...");
+                    Demo::Paint => {
+                        println!("Painting the 15 keys...");
 
-                    match draw::icon_test() {
-                        Ok(commands) => {
-                            for command in commands {
+                        for command in draw::paint_test() {
+                            let _ = cmd_tx.send(command);
+                        }
+                    }
+
+                    Demo::Icons => {
+                        println!("Drawing the icons...");
+
+                        match draw::icon_test() {
+                            Ok(commands) => {
+                                for command in commands {
+                                    let _ = cmd_tx.send(command);
+                                }
+                            }
+                            Err(message) => eprintln!("{message}"),
+                        }
+                    }
+
+                    Demo::Image(path) => {
+                        println!("Drawing {}...", path.display());
+
+                        match draw::image_test(path) {
+                            Ok(command) => {
                                 let _ = cmd_tx.send(command);
                             }
+                            // A bad path is the user's typo, not a crash.
+                            Err(message) => eprintln!("{message}"),
                         }
-                        Err(message) => eprintln!("{message}"),
                     }
                 }
             }
@@ -142,6 +151,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Shutting down.");
     Ok(())
+}
+
+/// What to put on the panel when the device connects.
+///
+/// The three test patterns exist so one look at the device can prove a piece of
+/// the drawing code: colours, text, or a picture. Normal runs draw the page the
+/// config describes.
+enum Demo {
+    Page,
+    Paint,
+    Icons,
+    Image(PathBuf),
+}
+
+/// Read the command line flags that choose a test pattern.
+fn demo_from_args() -> Demo {
+    let args: Vec<String> = std::env::args().collect();
+
+    if args.iter().any(|arg| arg == "--paint") {
+        return Demo::Paint;
+    }
+
+    if args.iter().any(|arg| arg == "--icons") {
+        return Demo::Icons;
+    }
+
+    if let Some(index) = args.iter().position(|arg| arg == "--image") {
+        if let Some(path) = args.get(index + 1) {
+            return Demo::Image(PathBuf::from(path));
+        }
+
+        eprintln!("--image needs a path, e.g. --image assets/test-image.png");
+    }
+
+    Demo::Page
 }
 
 /// Print the event and run whatever action the config binds to it.

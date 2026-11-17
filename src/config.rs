@@ -33,9 +33,36 @@ pub struct Binding {
     /// Raw id from the device: knobs are 1 and 2, screen buttons are 7..=10.
     pub id: u8,
 
+    /// How the key should look. Only used by screen keys (`on = "touch"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display: Option<Display>,
+
     /// The rest of the keys belong to the action, so the TOML stays flat.
     #[serde(flatten)]
     pub action: Action,
+}
+
+/// The face of one screen key: what is drawn in its 90x90 square.
+///
+/// Every field is optional, so a key can be just a colour, just an icon, just
+/// text, or any mix. Anything left out falls back to a sensible default.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Display {
+    /// Text on the key. Falls back to the action's name when omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+
+    /// Path to a PNG icon, relative to the folder `bindings.toml` is in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
+
+    /// Background colour, written `"#rrggbb"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub colour: Option<String>,
+
+    /// Colour of the label and icon, written `"#rrggbb"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ink: Option<String>,
 }
 
 /// Which kind of input a binding listens to.
@@ -189,6 +216,7 @@ fn press(id: u8, action: Action) -> Binding {
     Binding {
         on: Input::Press,
         id,
+        display: None,
         action,
     }
 }
@@ -197,17 +225,27 @@ fn rotate(id: u8, action: Action) -> Binding {
     Binding {
         on: Input::Rotate,
         id,
+        display: None,
         action,
     }
 }
 
 impl Config {
-    /// The action bound to a specific input, if there is one.
-    pub fn action(&self, on: Input, id: u8) -> Option<&Action> {
+    /// The binding for a specific control, if there is one.
+    pub fn binding(&self, on: Input, id: u8) -> Option<&Binding> {
         self.bindings
             .iter()
             .find(|binding| binding.on == on && binding.id == id)
-            .map(|binding| &binding.action)
+    }
+
+    /// The action bound to a specific input, if there is one.
+    pub fn action(&self, on: Input, id: u8) -> Option<&Action> {
+        self.binding(on, id).map(|binding| &binding.action)
+    }
+
+    /// How a screen key should look, if the file says.
+    pub fn display(&self, on: Input, id: u8) -> Option<&Display> {
+        self.binding(on, id).and_then(|binding| binding.display.as_ref())
     }
 
     /// Write the config back to disk. A GUI will call this after editing.
@@ -233,7 +271,7 @@ pub fn load_or_create(path: &Path) -> Result<Config, Box<dyn std::error::Error>>
 }
 
 /// Comment block at the top of the generated file. Not parsed.
-const FILE_HEADER: &str = r#"# fiondeck-rust bindings
+const FILE_HEADER: &str = r##"# fiondeck-rust bindings
 #
 # Edit this file, then restart the program.
 #
@@ -247,8 +285,18 @@ const FILE_HEADER: &str = r#"# fiondeck-rust bindings
 # brightness_step:  step    = 1     (per knob detent, negative = down)
 # set_brightness:   level   = 0..10
 # disabled:         no extra keys
+#
+# A screen key can also say what it looks like:
+#
+#   display = { label = "Mic", icon = "icons/mic-on.png",
+#               colour = "#2f6f4f", ink = "#ffffff" }
+#
+# display is optional and so is every field in it. `icon` is a PNG path
+# relative to this file; a one-colour glyph works best, because it is drawn in
+# `ink` whatever colour the file itself is. Without a label the action's name
+# is shown instead.
 
-"#;
+"##;
 
 #[cfg(test)]
 mod tests {
@@ -342,6 +390,59 @@ pattern = "buzz"
         let text = toml::to_string_pretty(&config).unwrap();
         let parsed: Config = toml::from_str(&text).unwrap();
         assert_eq!(config, parsed);
+    }
+
+    #[test]
+    fn parses_a_display_block() {
+        let text = r##"
+[[binding]]
+on = "touch"
+id = 5
+action = "vibrate"
+pattern = "short"
+display = { label = "Mic", icon = "icons/mic-on.png", colour = "#2f6f4f", ink = "#ffffff" }
+"##;
+
+        let config: Config = toml::from_str(text).unwrap();
+        let display = config.binding(Input::Touch, 5).unwrap().display.as_ref().unwrap();
+
+        assert_eq!(display.label.as_deref(), Some("Mic"));
+        assert_eq!(display.icon.as_deref(), Some("icons/mic-on.png"));
+        assert_eq!(display.colour.as_deref(), Some("#2f6f4f"));
+        assert_eq!(display.ink.as_deref(), Some("#ffffff"));
+
+        // The action still parses next to the extra table.
+        assert_eq!(
+            config.action(Input::Touch, 5),
+            Some(&Action::Vibrate {
+                pattern: Pattern::Short
+            })
+        );
+    }
+
+    #[test]
+    fn a_display_block_can_be_partial() {
+        let text = r##"
+[[binding]]
+on = "touch"
+id = 0
+action = "disabled"
+display = { colour = "#101010" }
+"##;
+
+        let config: Config = toml::from_str(text).unwrap();
+        let display = config.display(Input::Touch, 0).unwrap();
+
+        assert_eq!(display.colour.as_deref(), Some("#101010"));
+        assert_eq!(display.label, None);
+        assert_eq!(display.icon, None);
+    }
+
+    #[test]
+    fn bindings_without_a_display_block_have_none() {
+        let config: Config = toml::from_str(EXAMPLE).unwrap();
+
+        assert_eq!(config.display(Input::Press, 1), None);
     }
 
     #[test]
