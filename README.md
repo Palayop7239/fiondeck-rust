@@ -22,7 +22,7 @@
 > [!IMPORTANT]
 > Fiondeck is early in development. I'm a Rust beginner so this serves me as a learning project, don't expect high quality code.
 > <br>
-> I used AI as a tool to help me learning and improving some code parts. I prefer being transparent with this
+> I used AI as a tool to help me learning, improving some code parts and pushing commits quicker. I prefer being transparent with this
 ## Credits
 Thanks to 
 - **foxxyz** for the research on [foxxyz/loupedeck](https://github.com/foxxyz/loupedeck)
