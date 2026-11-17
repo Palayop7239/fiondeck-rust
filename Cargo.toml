@@ -8,3 +8,7 @@ serialport = "4"
 ctrlc = "3"
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
+
+# No wgpu: tiny-skia rasterizes on the CPU and blits with softbuffer.
+# `thread-pool` is required -- iced 0.14 refuses to compile without an executor.
+iced = { version = "0.14", default-features = false, features = ["tiny-skia", "thread-pool"] }

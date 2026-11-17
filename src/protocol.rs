@@ -41,6 +41,20 @@ pub const SET_VIBRATION: u8 = 0x1b;
 pub const HANDSHAKE_REQUEST: &[u8] =
     b"GET /index.html\nHTTP/1.1\nConnection: Upgrade\nUpgrade: websocket\nSec-WebSocket-Key: 123abc\n\n";
 
+/// The first line of the device's reply to the upgrade.
+///
+/// Worth waiting for: it is the only confirmation that the device accepted
+/// this connection, and it arrives before any input frames do.
+pub const HANDSHAKE_REPLY: &[u8] = b"HTTP/1.1";
+
+/// A WebSocket close frame, as sent by the reference client on shutdown
+/// (`connections/serial.js`, `WS_CLOSE_FRAME`).
+///
+/// Skipping this is why the device can stay wedged after an unclean exit: it
+/// still believes a client is attached, so it ignores the next handshake
+/// until it is power cycled.
+pub const CLOSE_FRAME: &[u8] = &[0x88, 0x80, 0x00, 0x00, 0x00, 0x00];
+
 /// Wrap `command` + `data` into one complete packet ready to write to the port.
 pub fn build_packet(command: u8, transaction_id: u8, data: &[u8]) -> Vec<u8> {
     // 1. Inner message.

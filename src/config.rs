@@ -46,6 +46,8 @@ pub enum Input {
     Press,
     /// A knob turn.
     Rotate,
+    /// A touch on one of the screen keys, ids `0..=14`.
+    Touch,
 }
 
 /// What to do when the input fires.
@@ -107,6 +109,19 @@ impl Pattern {
     /// The byte the device expects for this pattern.
     pub fn byte(self) -> u8 {
         self as u8
+    }
+}
+
+impl Action {
+    /// Short description for the GUI, e.g. what to print inside a key square.
+    pub fn label(&self) -> String {
+        match self {
+            Action::Vibrate { pattern } => format!("vibrate {pattern:?}"),
+            // `{step:+}` prints the sign, so +1 and -2 are obvious.
+            Action::BrightnessStep { step } => format!("brightness {step:+}"),
+            Action::SetBrightness { level } => format!("brightness {level}/10"),
+            Action::Disabled => "disabled".to_owned(),
+        }
     }
 }
 
@@ -222,8 +237,10 @@ const FILE_HEADER: &str = r#"# fiondeck-rust bindings
 #
 # Edit this file, then restart the program.
 #
-# on     = "press" (knob press or screen button) or "rotate" (knob turn)
+# on     = "press" (knob press or screen button), "rotate" (knob turn),
+#          or "touch" (one screen key)
 # id     = knobs: 1, 2          screen buttons: 7, 8, 9, 10
+#          screen keys: 0..14   (5 across, 3 down, counted left to right)
 # action = "vibrate" | "brightness_step" | "set_brightness" | "disabled"
 #
 # vibrate:          pattern = "short" | "medium" | "long" | "buzz" | ...
@@ -285,6 +302,38 @@ action = "disabled"
         );
         assert_eq!(config.action(Input::Press, 9), Some(&Action::Disabled));
         assert_eq!(config.action(Input::Press, 2), None);
+    }
+
+    #[test]
+    fn parses_touch_binding() {
+        let text = r#"
+[[binding]]
+on = "touch"
+id = 3
+action = "vibrate"
+pattern = "buzz"
+"#;
+        let config: Config = toml::from_str(text).unwrap();
+        assert_eq!(
+            config.action(Input::Touch, 3),
+            Some(&Action::Vibrate {
+                pattern: Pattern::Buzz
+            })
+        );
+        assert_eq!(config.action(Input::Touch, 4), None);
+    }
+
+    #[test]
+    fn labels_read_like_the_gui_shows_them() {
+        assert_eq!(
+            Action::BrightnessStep { step: 2 }.label(),
+            "brightness +2".to_owned()
+        );
+        assert_eq!(
+            Action::SetBrightness { level: 7 }.label(),
+            "brightness 7/10".to_owned()
+        );
+        assert_eq!(Action::Disabled.label(), "disabled".to_owned());
     }
 
     #[test]

@@ -1,11 +1,16 @@
 /// Messages sent from the serial worker thread to the main thread.
 #[derive(Debug, Clone)]
 pub enum SerialEvent {
-    /// The port opened successfully.
-    DeviceOpened(String),
+    /// No device yet. The worker keeps scanning in the background.
+    Waiting,
+    /// A port opened, and the handshake has been sent.
+    Connected(String),
+    /// The port went away: cable pulled, device reset, or a read/write error.
+    /// The worker closes the port and starts scanning again.
+    Disconnected(String),
     /// One complete packet, with the `0x82` wrapper already removed.
     Frame(Vec<u8>),
-    /// Something went wrong on the serial link.
+    /// Something went wrong that is worth printing but is not fatal.
     Error(String),
 }
 

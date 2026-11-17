@@ -1,9 +1,11 @@
 mod config;
 mod discovery;
+mod gui;
 mod messages;
 mod parser;
 mod protocol;
 mod serial_worker;
+mod surface;
 
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -16,22 +18,18 @@ use crate::messages::{button_label, knob_label, Cmd, DeviceEvent, SerialEvent};
 use crate::parser::Parser;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // `--gui` opens the iced window instead of running the device app.
+    if std::env::args().any(|arg| arg == "--gui") {
+        gui::run()?;
+        return Ok(());
+    }
+
     let config = config::load_or_create(Path::new(config::DEFAULT_PATH))?;
     println!(
         "Loaded {} bindings from {}",
         config.bindings.len(),
         config::DEFAULT_PATH
     );
-
-    let port_name = match discovery::find_loupedeck_port() {
-        Some(name) => name,
-        None => {
-            println!("No Loupedeck/Razer device found.");
-            return Ok(());
-        }
-    };
-
-    println!("Found device on {port_name}");
 
     let running = Arc::new(AtomicBool::new(true));
     let running_for_ctrlc = running.clone();
@@ -44,15 +42,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Main -> worker: commands to send to the device.
     let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>();
 
+    // The worker finds the device and reconnects on its own, so startup never
+    // waits for hardware to be present.
     let running_for_worker = running.clone();
-    std::thread::spawn(move || {
-        serial_worker::run(port_name, event_tx, running_for_worker, cmd_rx);
+    let worker = std::thread::spawn(move || {
+        serial_worker::run(event_tx, running_for_worker, cmd_rx);
     });
 
-    // Match the screen to the configured starting brightness.
     let mut brightness: i16 = config.brightness.min(10) as i16;
-    let _ = cmd_tx.send(Cmd::SetBrightness(brightness as u8));
-    println!("Brightness {brightness}/10. Press Ctrl+C to quit.");
+    println!("Looking for a Loupedeck. Press Ctrl+C to quit.");
 
     let mut parser = Parser::new();
 
@@ -66,7 +64,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
 
         match event {
-            SerialEvent::DeviceOpened(name) => println!("Opened {name}"),
+            SerialEvent::Waiting => println!("No device yet; still scanning."),
+
+            SerialEvent::Connected(name) => {
+                println!("Connected to {name}");
+                // Commands sent before the port existed were dropped, so put
+                // the screen back to the value the config asked for.
+                set_brightness(brightness, &cmd_tx);
+            }
+
+            SerialEvent::Disconnected(reason) => {
+                println!("Disconnected: {reason}");
+                println!("Scanning again; plug it back in whenever you like.");
+            }
 
             SerialEvent::Frame(frame) => {
                 let Some(device_event) = parser.parse(&frame) else {
@@ -80,6 +90,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             SerialEvent::Error(message) => println!("Serial error: {message}"),
         }
     }
+
+    // Let the worker close and drop the port before the process exits, so the
+    // next run can open it again without unplugging anything.
+    let _ = worker.join();
 
     println!("Shutting down.");
     Ok(())
@@ -117,6 +131,18 @@ fn handle_event(
 
         DeviceEvent::TouchStart { id, x, y } => {
             println!("touch start id={id} x={x} y={y}");
+
+            // A touch is a position, not an id: work out which key was hit.
+            let Some(key) = surface::key_at(*x, *y) else {
+                println!("  (outside the screen)");
+                return;
+            };
+
+            println!("  key {key}");
+            match config.action(Input::Touch, key) {
+                Some(action) => run_action(action, 1, cmd_tx, brightness),
+                None => println!("  (no binding for touch key {key})"),
+            }
         }
 
         DeviceEvent::TouchMove { id, x, y } => {
