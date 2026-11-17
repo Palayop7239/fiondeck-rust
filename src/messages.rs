@@ -52,6 +52,17 @@ pub enum Cmd {
     SetBrightness(u8),
     /// Haptic pattern byte, see `protocol::HAPTIC_*`.
     Vibrate(u8),
+    /// Write a rectangle of pixels and show it on the panel.
+    ///
+    /// `pixels` is `width * height * 2` bytes of little-endian RGB565. The
+    /// worker sends the frame buffer write followed by the refresh.
+    Framebuffer {
+        x: u16,
+        y: u16,
+        width: u16,
+        height: u16,
+        pixels: Vec<u8>,
+    },
 }
 
 /// Human-readable name for a raw button id.

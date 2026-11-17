@@ -1,5 +1,6 @@
 mod config;
 mod discovery;
+mod draw;
 mod gui;
 mod messages;
 mod parser;
@@ -23,6 +24,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         gui::run()?;
         return Ok(());
     }
+
+    // `--paint` fills the 15 keys with colours, to check the panel layout.
+    let paint = std::env::args().any(|arg| arg == "--paint");
 
     let config = config::load_or_create(Path::new(config::DEFAULT_PATH))?;
     println!(
@@ -71,6 +75,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // Commands sent before the port existed were dropped, so put
                 // the screen back to the value the config asked for.
                 set_brightness(brightness, &cmd_tx);
+
+                if paint {
+                    println!("Painting the 15 keys...");
+                    for command in draw::paint_test() {
+                        let _ = cmd_tx.send(command);
+                    }
+                }
             }
 
             SerialEvent::Disconnected(reason) => {

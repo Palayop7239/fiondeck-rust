@@ -36,6 +36,14 @@ pub const SET_BRIGHTNESS: u8 = 0x09;
 /// Command: trigger a haptic pattern (one data byte).
 pub const SET_VIBRATION: u8 = 0x1b;
 
+/// Command: write pixels into the frame buffer. Nothing appears until `DRAW`.
+pub const FRAMEBUFF: u8 = 0x10;
+/// Command: show the frame buffer on the panel.
+pub const DRAW: u8 = 0x0f;
+
+/// Display id of the Live S panel, the reference client's `'\x00M'`.
+pub const DISPLAY_CENTER: [u8; 2] = [0x00, b'M'];
+
 /// The fake WebSocket upgrade the device expects right after the port opens.
 /// Line endings are LF, not CRLF.
 pub const HANDSHAKE_REQUEST: &[u8] =
@@ -92,6 +100,41 @@ pub fn vibration_packet(transaction_id: u8, pattern: u8) -> Vec<u8> {
     build_packet(SET_VIBRATION, transaction_id, &[pattern])
 }
 
+/// Frame buffer packet: a rectangle of RGB565 pixels.
+///
+/// Data layout, from the reference client's `drawBuffer`:
+///
+/// ```text
+/// [display id: 2 bytes][x][y][width][height][pixels]
+///                        \ all big-endian, u16 /
+/// ```
+///
+/// The pixels are **little-endian** RGB565, unlike the coordinates. `pixels`
+/// must be exactly `width * height * 2` bytes.
+pub fn framebuffer_packet(
+    transaction_id: u8,
+    x: u16,
+    y: u16,
+    width: u16,
+    height: u16,
+    pixels: &[u8],
+) -> Vec<u8> {
+    let mut data = Vec::with_capacity(10 + pixels.len());
+    data.extend_from_slice(&DISPLAY_CENTER);
+    data.extend_from_slice(&x.to_be_bytes());
+    data.extend_from_slice(&y.to_be_bytes());
+    data.extend_from_slice(&width.to_be_bytes());
+    data.extend_from_slice(&height.to_be_bytes());
+    data.extend_from_slice(pixels);
+
+    build_packet(FRAMEBUFF, transaction_id, &data)
+}
+
+/// Push the frame buffer to the panel. Always follows a frame buffer write.
+pub fn draw_packet(transaction_id: u8) -> Vec<u8> {
+    build_packet(DRAW, transaction_id, &DISPLAY_CENTER)
+}
+
 /// Next transaction id: 1, 2, 3, ... 255, 1, 2, ...
 pub fn next_transaction_id(current: u8) -> u8 {
     let next = current.wrapping_add(1);
@@ -135,6 +178,55 @@ mod tests {
             vibration_packet(1, 0x56),
             vec![0x82, 0x84, 0, 0, 0, 0, 0x04, 0x1b, 0x01, 0x56]
         );
+    }
+
+    #[test]
+    fn framebuffer_header_is_big_endian() {
+        let packet = framebuffer_packet(1, 15, 90, 2, 1, &[0x00, 0xf8, 0xe0, 0x07]);
+
+        assert_eq!(
+            packet,
+            vec![
+                0x82, 0x91, 0x00, 0x00, 0x00, 0x00, // wrapper: len 0x11, masked
+                0x11, 0x10, 0x01, // message: length, FRAMEBUFF, transaction 1
+                0x00, 0x4d, // display id
+                0x00, 0x0f, // x = 15
+                0x00, 0x5a, // y = 90
+                0x00, 0x02, // width
+                0x00, 0x01, // height
+                0x00, 0xf8, 0xe0, 0x07, // pixels, little-endian
+            ]
+        );
+    }
+
+    #[test]
+    fn draw_sends_only_the_display_id() {
+        let packet = draw_packet(9);
+
+        assert_eq!(
+            packet,
+            vec![0x82, 0x85, 0x00, 0x00, 0x00, 0x00, 0x05, 0x0f, 0x09, 0x00, 0x4d]
+        );
+    }
+
+    #[test]
+    fn a_full_screen_uses_the_extended_wrapper() {
+        // 480 * 270 pixels, two bytes each.
+        let pixels = vec![0u8; 480 * 270 * 2];
+        let packet = framebuffer_packet(1, 0, 0, 480, 270, &pixels);
+
+        // 0x82 0xff, four zero bytes, the length as u32, four zero bytes.
+        assert_eq!(packet[0], 0x82);
+        assert_eq!(packet[1], 0xff);
+
+        let message_length = 3 + 10 + pixels.len();
+        assert_eq!(
+            u32::from_be_bytes([packet[6], packet[7], packet[8], packet[9]]) as usize,
+            message_length
+        );
+        assert_eq!(packet[14], 0xff); // inner length is clamped
+        assert_eq!(packet[15], 0x10); // FRAMEBUFF
+        assert_eq!(packet.len(), 14 + message_length);
     }
 
     #[test]

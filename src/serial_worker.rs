@@ -254,17 +254,49 @@ fn drain_commands(
     transaction_id: &mut u8,
 ) -> Result<(), String> {
     while let Ok(cmd) = cmd_rx.try_recv() {
-        let packet = match cmd {
-            Cmd::SetBrightness(level) => protocol::brightness_packet(*transaction_id, level),
-            Cmd::Vibrate(pattern) => protocol::vibration_packet(*transaction_id, pattern),
-        };
+        match cmd {
+            Cmd::SetBrightness(level) => {
+                let packet = protocol::brightness_packet(*transaction_id, level);
+                send(port, transaction_id, packet)?;
+            }
 
-        // One write for the whole packet: outer wrapper + inner message.
-        port.write_all(&packet)
-            .map_err(|error| format!("write failed: {error}"))?;
+            Cmd::Vibrate(pattern) => {
+                let packet = protocol::vibration_packet(*transaction_id, pattern);
+                send(port, transaction_id, packet)?;
+            }
 
-        *transaction_id = protocol::next_transaction_id(*transaction_id);
+            Cmd::Framebuffer {
+                x,
+                y,
+                width,
+                height,
+                pixels,
+            } => {
+                let packet =
+                    protocol::framebuffer_packet(*transaction_id, x, y, width, height, &pixels);
+                send(port, transaction_id, packet)?;
+
+                // Writing the frame buffer changes nothing on screen until it
+                // is drawn, one message later.
+                send(port, transaction_id, protocol::draw_packet(*transaction_id))?;
+            }
+        }
     }
+
+    Ok(())
+}
+
+/// Write one packet and move on to the next transaction id.
+fn send(
+    port: &mut Box<dyn SerialPort>,
+    transaction_id: &mut u8,
+    packet: Vec<u8>,
+) -> Result<(), String> {
+    // One write for the whole packet: outer wrapper + inner message.
+    port.write_all(&packet)
+        .map_err(|error| format!("write failed: {error}"))?;
+
+    *transaction_id = protocol::next_transaction_id(*transaction_id);
 
     Ok(())
 }
