@@ -12,6 +12,10 @@ toml = "0.8"
 # Parses and rasterizes TrueType fonts on the CPU, no system libraries needed.
 fontdue = "0.9"
 
+# Decodes PNG and JPEG for icons and photos. Only these two formats are enabled
+# so the build stays small; GIF comes later, with its own frame handling.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+
 # No wgpu: tiny-skia rasterizes on the CPU and blits with softbuffer.
 # `thread-pool` is required -- iced 0.14 refuses to compile without an executor.
 iced = { version = "0.14", default-features = false, features = ["tiny-skia", "thread-pool"] }

@@ -8,6 +8,7 @@
 //! Colours are 8 bits per channel here, like CSS. The panel gets RGB565.
 
 use std::fs;
+use std::path::Path;
 use std::sync::OnceLock;
 
 use fontdue::{Font, FontSettings};
@@ -106,6 +107,68 @@ impl Canvas {
                 self.set(column, row, color);
             }
         }
+    }
+
+    /// Draw an image file inside a box, keeping its shape.
+    ///
+    /// The picture is scaled to fit `width x height` and centred, so a wide
+    /// photo gets empty space above and below rather than being squashed. Any
+    /// transparency in the file is blended over what is already on the canvas,
+    /// which is what makes PNG icons with a soft edge look right.
+    pub fn draw_image(
+        &mut self,
+        path: &Path,
+        x: i32,
+        y: i32,
+        width: u16,
+        height: u16,
+    ) -> Result<(), String> {
+        let source =
+            image::open(path).map_err(|error| format!("could not open {}: {error}", path.display()))?;
+
+        // Work in RGBA so a PNG with transparency keeps it.
+        let source = source.to_rgba8();
+        let (source_width, source_height) = source.dimensions();
+
+        if source_width == 0 || source_height == 0 {
+            return Err(format!("{} has no pixels", path.display()));
+        }
+
+        // One scale factor for both axes, so the shape is kept. `min` means
+        // the longer side decides it, which is what "fit" means.
+        let scale = (width as f32 / source_width as f32).min(height as f32 / source_height as f32);
+        let scaled_width = ((source_width as f32 * scale).round() as u32).max(1);
+        let scaled_height = ((source_height as f32 * scale).round() as u32).max(1);
+
+        // Triangle is a cheap smooth filter: better than nearest-neighbour on
+        // photos, and fast enough for a 90 px key.
+        let scaled = image::imageops::resize(
+            &source,
+            scaled_width,
+            scaled_height,
+            image::imageops::FilterType::Triangle,
+        );
+
+        // Centre the result in the box.
+        let origin_x = x + (width as i32 - scaled_width as i32) / 2;
+        let origin_y = y + (height as i32 - scaled_height as i32) / 2;
+
+        for (column, row, pixel) in scaled.enumerate_pixels() {
+            let [r, g, b, alpha] = pixel.0;
+            if alpha == 0 {
+                continue;
+            }
+
+            let pixel_x = origin_x + column as i32;
+            let pixel_y = origin_y + row as i32;
+
+            let color = Rgb::new(r, g, b);
+            let under = self.pixel_or(pixel_x, pixel_y);
+
+            self.set(pixel_x, pixel_y, color.blend(under, alpha));
+        }
+
+        Ok(())
     }
 
     /// Draw text with its baseline at `baseline`, starting at `x`.
@@ -218,6 +281,42 @@ pub fn label_key(index: u8, background: Rgb, label: &str, foreground: Rgb, size:
     canvas.into_cmd(origin_x, origin_y)
 }
 
+/// One key: an image centred on a solid background.
+///
+/// The key's colour shows through wherever the image is transparent, and
+/// around it if the image is not square. Bindings will call this once keys can
+/// carry an icon; only the tests use it until then.
+#[allow(dead_code)]
+pub fn image_key(index: u8, background: Rgb, path: &Path) -> Result<Cmd, String> {
+    let mut canvas = Canvas::new(surface::KEY_SIZE, surface::KEY_SIZE, background);
+    canvas.draw_image(path, 0, 0, surface::KEY_SIZE, surface::KEY_SIZE)?;
+
+    let (origin_x, origin_y) = key_origin(index);
+    Ok(canvas.into_cmd(origin_x, origin_y))
+}
+
+/// The whole screen as one image, for `--image`.
+///
+/// A full 480x270 frame is the best look at how scaling copes: a 259 KB frame
+/// arrives in one piece and any aspect-ratio mistake is obvious.
+pub fn image_test(path: &Path) -> Result<Cmd, String> {
+    let mut canvas = Canvas::new(
+        surface::SCREEN_WIDTH,
+        surface::SCREEN_HEIGHT,
+        Rgb::new(0, 0, 0),
+    );
+
+    canvas.draw_image(
+        path,
+        0,
+        0,
+        surface::SCREEN_WIDTH,
+        surface::SCREEN_HEIGHT,
+    )?;
+
+    Ok(canvas.into_cmd(0, 0))
+}
+
 /// One colour per key, each showing its own number.
 ///
 /// The order is deliberate: the first five are pure hues, the next four mix
@@ -301,6 +400,8 @@ fn load_font() -> Option<Font> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::*;
 
     #[test]
@@ -359,6 +460,101 @@ mod tests {
         canvas.set(0, 2, Rgb::new(255, 255, 255));
 
         assert_eq!(canvas.get(0, 0), Rgb::new(0, 0, 0));
+    }
+
+    /// Write a solid rectangle of colour as a PNG, for the image tests.
+    ///
+    /// `save` picks the format from the extension, so the file must end in
+    /// `.png`. It goes in the system temp folder and the caller deletes it.
+    fn write_test_image(name: &str, width: u32, height: u32, pixel: [u8; 4]) -> PathBuf {
+        let path = std::env::temp_dir().join(format!("fiondeck-{}-{name}.png", std::process::id()));
+        let buffer = image::RgbaImage::from_pixel(width, height, image::Rgba(pixel));
+
+        buffer.save(&path).expect("could not write the test image");
+        path
+    }
+
+    #[test]
+    fn a_wide_image_keeps_its_shape() {
+        // A 40x20 picture drawn into a 20x20 square becomes 20x10, centred:
+        // rows 5..15, with the background visible above and below.
+        let path = write_test_image("wide", 40, 20, [255, 0, 0, 255]);
+        let background = Rgb::new(0, 0, 255);
+
+        let mut canvas = Canvas::new(20, 20, background);
+        canvas.draw_image(&path, 0, 0, 20, 20).expect("draw");
+
+        assert_eq!(canvas.get(0, 4), background, "above the picture");
+        assert_eq!(canvas.get(0, 5), Rgb::new(255, 0, 0), "first row");
+        assert_eq!(canvas.get(19, 14), Rgb::new(255, 0, 0), "last row");
+        assert_eq!(canvas.get(0, 15), background, "below the picture");
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_tall_image_keeps_its_shape() {
+        // 20x40 into 20x20 becomes 10x20, centred: columns 5..15.
+        let path = write_test_image("tall", 20, 40, [0, 255, 0, 255]);
+        let background = Rgb::new(0, 0, 0);
+
+        let mut canvas = Canvas::new(20, 20, background);
+        canvas.draw_image(&path, 0, 0, 20, 20).expect("draw");
+
+        assert_eq!(canvas.get(4, 0), background, "left of the picture");
+        assert_eq!(canvas.get(5, 0), Rgb::new(0, 255, 0), "first column");
+        assert_eq!(canvas.get(14, 19), Rgb::new(0, 255, 0), "last column");
+        assert_eq!(canvas.get(15, 0), background, "right of the picture");
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn transparent_pixels_leave_the_key_alone() {
+        let path = write_test_image("clear", 8, 8, [0, 255, 0, 0]);
+        let background = Rgb::new(10, 20, 30);
+
+        let mut canvas = Canvas::new(8, 8, background);
+        canvas.draw_image(&path, 0, 0, 8, 8).expect("draw");
+
+        assert_eq!(canvas.get(4, 4), background);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_missing_image_is_an_error_not_a_panic() {
+        let mut canvas = Canvas::new(8, 8, Rgb::new(0, 0, 0));
+
+        let result = canvas.draw_image(Path::new("does-not-exist.png"), 0, 0, 8, 8);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn an_image_key_fills_the_square() {
+        let path = write_test_image("key", 32, 32, [255, 255, 0, 255]);
+        let background = Rgb::new(0, 0, 0);
+
+        match image_key(2, background, &path).expect("draw") {
+            Cmd::Framebuffer {
+                x,
+                y,
+                width,
+                height,
+                pixels,
+            } => {
+                assert_eq!((x, y), (15 + 2 * 90, 0));
+                assert_eq!((width, height), (90, 90));
+                assert_eq!(pixels.len(), 90 * 90 * 2);
+                // A square image leaves no background, so the first pixel is
+                // already the picture: yellow, little-endian.
+                assert_eq!(pixels[0..2], Rgb::new(255, 255, 0).bytes());
+            }
+            other => panic!("expected a framebuffer command, got {other:?}"),
+        }
+
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

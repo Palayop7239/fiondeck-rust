@@ -8,7 +8,7 @@ mod protocol;
 mod serial_worker;
 mod surface;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
@@ -27,6 +27,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // `--paint` fills the 15 keys with colours, to check the panel layout.
     let paint = std::env::args().any(|arg| arg == "--paint");
+
+    // `--image <path>` draws one picture across the whole screen.
+    let image_path = std::env::args()
+        .skip_while(|arg| arg != "--image")
+        .nth(1)
+        .map(PathBuf::from);
 
     let config = config::load_or_create(Path::new(config::DEFAULT_PATH))?;
     println!(
@@ -80,6 +86,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     println!("Painting the 15 keys...");
                     for command in draw::paint_test() {
                         let _ = cmd_tx.send(command);
+                    }
+                }
+
+                if let Some(path) = &image_path {
+                    println!("Drawing {}...", path.display());
+
+                    match draw::image_test(path) {
+                        Ok(command) => {
+                            let _ = cmd_tx.send(command);
+                        }
+                        // A bad path is the user's typo, not a crash.
+                        Err(message) => eprintln!("{message}"),
                     }
                 }
             }
